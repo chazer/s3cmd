@@ -31,4 +31,4 @@ COPY --from=build /usr/local/lib/python3.6/site-packages /usr/local/lib/python3.
 COPY --from=build /usr/local/bin/s3cmd /usr/local/bin/s3cmd
 COPY --from=build /root/.s3cfg /root/.s3cfg
 
-ENTRYPOINT /usr/local/bin/s3cmd
+ENTRYPOINT [ "/usr/local/bin/s3cmd" ]
