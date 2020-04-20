@@ -1,5 +1,5 @@
-#!/usr/bin/env python2
-# -*- coding=utf-8 -*-
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
 ## Amazon S3cmd - testsuite
 ## Author: Michal Ludvig <michal@logix.cz>
@@ -19,8 +19,6 @@ import getpass
 import S3.Exceptions
 import S3.Config
 from S3.ExitCodes import *
-
-PY3 = (sys.version_info >= (3,0))
 
 try:
     unicode
@@ -375,16 +373,39 @@ test_s3cmd("Invalid bucket name", ["mb", "--bucket-location=EU", pbucket('EU')],
 
 ## ====== Buckets list
 test_s3cmd("Buckets list", ["ls"],
-    must_find = [ "autotest-1", "autotest-2", "Autotest-3" ], must_not_find_re = "autotest-EU")
+    must_find = [ pbucket(1), pbucket(2), pbucket(3) ], must_not_find_re = pbucket('EU'))
 
+## ====== Directory for cache
+test_flushdir("Create cache dir", "testsuite/cachetest")
 
 ## ====== Sync to S3
-test_s3cmd("Sync to S3", ['sync', 'testsuite/', pbucket(1) + '/xyz/', '--exclude', 'demo/*', '--exclude', '*.png', '--no-encrypt', '--exclude-from', 'testsuite/exclude.encodings' ],
-           must_find = [ "ERROR: Upload of 'testsuite/permission-tests/permission-denied.txt' is not possible (Reason: Permission denied)",
-                         "WARNING: 32 non-printable characters replaced in: crappy-file-name/non-printables",
+test_s3cmd("Sync to S3", ['sync', 'testsuite/', pbucket(1) + '/xyz/', '--exclude', 'demo/*', '--exclude', '*.png', '--no-encrypt', '--exclude-from', 'testsuite/exclude.encodings', '--exclude', 'testsuite/cachetest/.s3cmdcache', '--cache-file', 'testsuite/cachetest/.s3cmdcache'],
+           must_find = ["ERROR: Upload of 'testsuite/permission-tests/permission-denied.txt' is not possible (Reason: Permission denied)",
+                        "WARNING: 32 non-printable characters replaced in: crappy-file-name/non-printables",
            ],
-           must_not_find_re = [ "demo/", "^(?!WARNING: Skipping).*\.png$", "permission-denied-dir" ],
+           must_not_find_re = ["demo/", "^(?!WARNING: Skipping).*\.png$", "permission-denied-dir"],
            retcode = EX_PARTIAL)
+
+## ====== Create new file and sync with caching enabled
+test_mkdir("Create cache dir", "testsuite/cachetest/content")
+with open("testsuite/cachetest/content/testfile", "w"):
+    pass
+
+test_s3cmd("Sync to S3 with caching", ['sync', 'testsuite/', pbucket(1) + '/xyz/', '--exclude', 'demo/*', '--exclude', '*.png', '--no-encrypt', '--exclude-from', 'testsuite/exclude.encodings', '--exclude', 'cachetest/.s3cmdcache', '--cache-file', 'testsuite/cachetest/.s3cmdcache' ],
+          must_find = "upload: 'testsuite/cachetest/content/testfile' -> '%s/xyz/cachetest/content/testfile'" % pbucket(1),
+          must_not_find = "upload 'testsuite/cachetest/.s3cmdcache'",
+          retcode = EX_PARTIAL)
+
+## ====== Remove content and retry cached sync with --delete-removed
+test_rmdir("Remove local file", "testsuite/cachetest/content")
+
+test_s3cmd("Sync to S3 and delete removed with caching", ['sync', 'testsuite/', pbucket(1) + '/xyz/', '--exclude', 'demo/*', '--exclude', '*.png', '--no-encrypt', '--exclude-from', 'testsuite/exclude.encodings', '--exclude', 'testsuite/cachetest/.s3cmdcache', '--cache-file', 'testsuite/cachetest/.s3cmdcache', '--delete-removed'],
+          must_find = "delete: '%s/xyz/cachetest/content/testfile'" % pbucket(1),
+          must_not_find = "dictionary changed size during iteration",
+          retcode = EX_PARTIAL)
+
+## ====== Remove cache directory and file
+test_rmdir("Remove cache dir", "testsuite/cachetest")
 
 if have_encoding:
     ## ====== Sync UTF-8 / GBK / ... to S3
@@ -615,7 +636,7 @@ test_s3cmd("Recursive copy, set ACL", ['cp', '-r', '--acl-public', '%s/xyz/' % p
 test_s3cmd("Verify ACL and MIME type", ['info', '%s/copy/etc2/Logo.PNG' % pbucket(2) ],
     must_find_re = [ "MIME type:.*image/png",
                      "ACL:.*\*anon\*: READ",
-                     "URL:.*http://%s.%s/copy/etc2/Logo.PNG" % (bucket(2), cfg.host_base) ])
+                     "URL:.*https?://%s.%s/copy/etc2/Logo.PNG" % (bucket(2), cfg.host_base) ])
 
 ## ====== modify MIME type
 test_s3cmd("Modify MIME type", ['modify', '--mime-type=binary/octet-stream', '%s/copy/etc2/Logo.PNG' % pbucket(2) ])
@@ -623,14 +644,14 @@ test_s3cmd("Modify MIME type", ['modify', '--mime-type=binary/octet-stream', '%s
 test_s3cmd("Verify ACL and MIME type", ['info', '%s/copy/etc2/Logo.PNG' % pbucket(2) ],
     must_find_re = [ "MIME type:.*binary/octet-stream",
                      "ACL:.*\*anon\*: READ",
-                     "URL:.*http://%s.%s/copy/etc2/Logo.PNG" % (bucket(2), cfg.host_base) ])
+                     "URL:.*https?://%s.%s/copy/etc2/Logo.PNG" % (bucket(2), cfg.host_base) ])
 
 test_s3cmd("Modify MIME type back", ['modify', '--mime-type=image/png', '%s/copy/etc2/Logo.PNG' % pbucket(2) ])
 
 test_s3cmd("Verify ACL and MIME type", ['info', '%s/copy/etc2/Logo.PNG' % pbucket(2) ],
     must_find_re = [ "MIME type:.*image/png",
                      "ACL:.*\*anon\*: READ",
-                     "URL:.*http://%s.%s/copy/etc2/Logo.PNG" % (bucket(2), cfg.host_base) ])
+                     "URL:.*https?://%s.%s/copy/etc2/Logo.PNG" % (bucket(2), cfg.host_base) ])
 
 test_s3cmd("Add cache-control header", ['modify', '--add-header=cache-control: max-age=3600, public', '%s/copy/etc2/Logo.PNG' % pbucket(2) ],
     must_find_re = [ "modify: .*" ])

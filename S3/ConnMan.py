@@ -9,7 +9,7 @@
 from __future__ import absolute_import
 
 import sys
-if sys.version_info >= (3,0):
+if sys.version_info >= (3, 0):
     from .Custom_httplib3x import httplib
 else:
     from .Custom_httplib27 import httplib
@@ -23,16 +23,12 @@ except ImportError:
     from urllib.parse import urlparse
 
 from .Config import Config
-from .Exceptions import ParameterError
+from .Exceptions import ParameterError, S3SSLCertificateError
 from .Utils import getBucketFromHostname
 
-if not 'CertificateError' in ssl.__dict__:
-    class CertificateError(Exception):
-        pass
-else:
-    CertificateError = ssl.CertificateError
 
-__all__ = [ "ConnMan" ]
+
+__all__ = ["ConnMan"]
 
 
 class http_connection(object):
@@ -65,6 +61,19 @@ class http_connection(object):
         return context
 
     @staticmethod
+    def _ssl_client_auth_context(certfile, keyfile, check_server_cert, cafile):
+        context = None
+        try:
+            cert_reqs = ssl.CERT_REQUIRED if check_server_cert else ssl.CERT_NONE
+            context = ssl._create_unverified_context(cafile=cafile,
+                                                     keyfile=keyfile,
+                                                     certfile=certfile,
+                                                     cert_reqs=cert_reqs)
+        except AttributeError: # no ssl._create_unverified_context
+            pass
+        return context
+
+    @staticmethod
     def _ssl_context():
         if http_connection.context_set:
             return http_connection.context
@@ -73,9 +82,16 @@ class http_connection(object):
         cafile = cfg.ca_certs_file
         if cafile == "":
             cafile = None
-        debug(u"Using ca_certs_file %s", cafile)
+        certfile = cfg.ssl_client_cert_file or None
+        keyfile = cfg.ssl_client_key_file or None # the key may be embedded into cert file
 
-        if cfg.check_ssl_certificate:
+        debug(u"Using ca_certs_file %s", cafile)
+        debug(u"Using ssl_client_cert_file %s", certfile)
+        debug(u"Using ssl_client_key_file %s", keyfile)
+
+        if certfile is not None:
+            context = http_connection._ssl_client_auth_context(certfile, keyfile, cfg.check_ssl_certificate, cafile)
+        elif cfg.check_ssl_certificate:
             context = http_connection._ssl_verified_context(cafile)
         else:
             context = http_connection._ssl_unverified_context(cafile)
@@ -128,11 +144,13 @@ class http_connection(object):
         cert = self.c.sock.getpeercert()
         try:
             ssl.match_hostname(cert, self.hostname)
-        except AttributeError: # old ssl module doesn't have this function
+        except AttributeError:
+            # old ssl module doesn't have this function
             return
-        except ValueError: # empty SSL cert means underlying SSL library didn't validate it, we don't either.
+        except ValueError:
+            # empty SSL cert means underlying SSL library didn't validate it, we don't either.
             return
-        except CertificateError as e:
+        except S3CertificateError as e:
             if not self.forgive_wildcard_cert(cert, self.hostname):
                 raise e
 
@@ -259,16 +277,27 @@ class ConnMan(object):
     @staticmethod
     def put(conn):
         if conn.id.startswith("proxy://"):
-            conn.c.close()
+            ConnMan.close(conn)
             debug("ConnMan.put(): closing proxy connection (keep-alive not yet supported)")
             return
 
         if conn.counter >= ConnMan.conn_max_counter:
-            conn.c.close()
+            ConnMan.close(conn)
             debug("ConnMan.put(): closing over-used connection")
+            return
+
+        cfg = Config()
+        if not cfg.connection_pooling:
+            ConnMan.close(conn)
+            debug("ConnMan.put(): closing connection (connection pooling disabled)")
             return
 
         ConnMan.conn_pool_sem.acquire()
         ConnMan.conn_pool[conn.id].append(conn)
         ConnMan.conn_pool_sem.release()
         debug("ConnMan.put(): connection put back to pool (%s#%d)" % (conn.id, conn.counter))
+
+    @staticmethod
+    def close(conn):
+        if conn:
+            conn.c.close()

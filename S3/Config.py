@@ -24,11 +24,15 @@ except ImportError:
     import http.client as httplib
 import locale
 
-try: 
- from configparser import NoOptionError, NoSectionError, MissingSectionHeaderError, ConfigParser as PyConfigParser
+try:
+ from configparser import (NoOptionError, NoSectionError,
+                           MissingSectionHeaderError, ParsingError,
+                           ConfigParser as PyConfigParser)
 except ImportError:
   # Python2 fallback code
-  from ConfigParser import NoOptionError, NoSectionError, MissingSectionHeaderError, ConfigParser as PyConfigParser
+  from ConfigParser import (NoOptionError, NoSectionError,
+                            MissingSectionHeaderError, ParsingError,
+                            ConfigParser as PyConfigParser)
 
 try:
     unicode
@@ -149,6 +153,8 @@ class Config(object):
     gpg_decrypt = u"%(gpg_command)s -d --verbose --no-use-agent --batch --yes --passphrase-fd %(passphrase_fd)s -o %(output_file)s %(input_file)s"
     use_https = True
     ca_certs_file = u""
+    ssl_client_key_file = u""
+    ssl_client_cert_file = u""
     check_ssl_certificate = True
     check_ssl_hostname = True
     bucket_location = u"US"
@@ -157,8 +163,13 @@ class Config(object):
     use_mime_magic = True
     mime_type = u""
     enable_multipart = True
-    multipart_chunk_size_mb = 15    # MB
-    multipart_max_chunks = 10000    # Maximum chunks on AWS S3, could be different on other S3-compatible APIs
+    # Chunk size is at the same time the chunk size and the threshold
+    multipart_chunk_size_mb = 15    # MiB
+    # Maximum chunk size for s3-to-s3 copy is 5 GiB.
+    # But, use a lot lower value by default (1GiB)
+    multipart_copy_chunk_size_mb = 1 * 1024
+    # Maximum chunks on AWS S3, could be different on other S3-compatible APIs
+    multipart_max_chunks = 10000
     # List of checks to be performed for 'sync'
     sync_checks = ['size', 'md5']   # 'weak-timestamp'
     # List of compiled REGEXPs
@@ -206,6 +217,7 @@ class Config(object):
     # s3 will timeout if a request/transfer is stuck for more than a short time
     throttle_max = 100
     public_url_use_https = False
+    connection_pooling = True
 
     ## Creating a singleton
     def __new__(self, configfile = None, access_key=None, secret_key=None, access_token=None):
@@ -280,36 +292,49 @@ class Config(object):
         if self._access_token_refresh:
             try:
                 self.role_config()
-            except:
+            except Exception:
                 warning("Could not refresh role")
 
     def aws_credential_file(self):
         try:
-            aws_credential_file = os.path.expanduser('~/.aws/credentials') 
-            if 'AWS_CREDENTIAL_FILE' in os.environ and os.path.isfile(os.environ['AWS_CREDENTIAL_FILE']):
-                aws_credential_file = config_unicodise(os.environ['AWS_CREDENTIAL_FILE'])
+            aws_credential_file = os.path.expanduser('~/.aws/credentials')
+            credential_file_from_env = os.environ.get('AWS_CREDENTIAL_FILE')
+            if credential_file_from_env and \
+               os.path.isfile(credential_file_from_env):
+                aws_credential_file = config_unicodise(credential_file_from_env)
+            elif not os.path.isfile(aws_credential_file):
+                return
+
+            warning("Errno %d accessing credentials file %s" % (e.errno, aws_credential_file))
 
             config = PyConfigParser()
 
             debug("Reading AWS credentials from %s" % (aws_credential_file))
+            with io.open(aws_credential_file, "r",
+                         encoding=getattr(self, 'encoding', 'UTF-8')) as fp:
+                config_string = fp.read()
             try:
-                config.read(aws_credential_file)
-            except MissingSectionHeaderError:
-                # if header is missing, this could be deprecated credentials file format
-                # as described here: https://blog.csanchez.org/2011/05/
-                # then do the hacky-hack and add default header
-                # to be able to read the file with PyConfigParser() 
-                config_string = None
-                with open(aws_credential_file, 'r') as f:
-                    config_string = '[default]\n' + f.read()
-                config.read_string(config_string.decode('utf-8'))
-
+                try:
+                    # readfp is replaced by read_file in python3,
+                    # but so far readfp it is still available.
+                    config.readfp(io.StringIO(config_string))
+                except MissingSectionHeaderError:
+                    # if header is missing, this could be deprecated credentials file format
+                    # as described here: https://blog.csanchez.org/2011/05/
+                    # then do the hacky-hack and add default header
+                    # to be able to read the file with PyConfigParser()
+                    config_string = u'[default]\n' + config_string
+                    config.readfp(io.StringIO(config_string))
+            except ParsingError as exc:
+                raise ValueError(
+                    "Error reading aws_credential_file "
+                    "(%s): %s" % (aws_credential_file, str(exc)))
 
             profile = config_unicodise(os.environ.get('AWS_PROFILE', "default"))
             debug("Using AWS profile '%s'" % (profile))
 
             # get_key - helper function to read the aws profile credentials
-            # including the legacy ones as described here: https://blog.csanchez.org/2011/05/ 
+            # including the legacy ones as described here: https://blog.csanchez.org/2011/05/
             def get_key(profile, key, legacy_key, print_warning=True):
                 result = None
 
@@ -324,7 +349,7 @@ class Config(object):
                             profile = "default"
                             result = config.get(profile, key)
                             warning(
-                                    "Legacy configuratin key '%s' used, " % (key) + 
+                                    "Legacy configuratin key '%s' used, " % (key) +
                                     "please use the standardized config format as described here: " +
                                     "https://aws.amazon.com/blogs/security/a-new-and-standardized-way-to-manage-credentials-in-the-aws-sdks/"
                                      )
@@ -332,23 +357,23 @@ class Config(object):
                             pass
 
                 if result:
-                    debug("Found the configuration option '%s' for the AWS Profile '%s' in the credentials file %s" % (key, profile, aws_credential_file)) 
+                    debug("Found the configuration option '%s' for the AWS Profile '%s' in the credentials file %s" % (key, profile, aws_credential_file))
                 return result
 
-            profile_access_key = get_key(profile, "aws_access_key_id", "AWSAccessKeyId") 
+            profile_access_key = get_key(profile, "aws_access_key_id", "AWSAccessKeyId")
             if profile_access_key:
                 Config().update_option('access_key', config_unicodise(profile_access_key))
 
-            profile_secret_key = get_key(profile, "aws_secret_access_key", "AWSSecretKey") 
+            profile_secret_key = get_key(profile, "aws_secret_access_key", "AWSSecretKey")
             if profile_secret_key:
                 Config().update_option('secret_key', config_unicodise(profile_secret_key))
 
-            profile_access_token = get_key(profile, "aws_session_token", None, False) 
+            profile_access_token = get_key(profile, "aws_session_token", None, False)
             if profile_access_token:
                 Config().update_option('access_token', config_unicodise(profile_access_token))
 
         except IOError as e:
-            warning("%d accessing credentials file %s" % (e.errno, aws_credential_file))
+            warning("Errno %d accessing credentials file %s" % (e.errno, aws_credential_file))
         except NoSectionError as e:
             warning("Couldn't find AWS Profile '%s' in the credentials file '%s'" % (profile, aws_credential_file))
 
@@ -381,8 +406,8 @@ class Config(object):
 
         if cp.get('add_headers'):
             for option in cp.get('add_headers').split(","):
-                (key, value) = option.split(':')
-                self.extra_headers[key.replace('_', '-').strip()] = value.strip()
+                (key, value) = option.split(':', 1)
+                self.extra_headers[key.strip()] = value.strip()
 
         self._parsed_files.append(configfile)
 
@@ -424,7 +449,7 @@ class Config(object):
                 shift = 0
             try:
                 value = shift and int(value[:-1]) << shift or int(value)
-            except:
+            except Exception:
                 raise ValueError("Config: value of option %s must have suffix m, k, or nothing, not '%s'" % (option, value))
 
         ## allow yes/no, true/false, on/off and 1/0 for boolean options

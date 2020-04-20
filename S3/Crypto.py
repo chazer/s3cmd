@@ -14,15 +14,12 @@ import base64
 
 from . import Config
 from logging import debug
-from .Utils import encode_to_s3, time_to_epoch, deunicodise, decode_from_s3
+from .Utils import (encode_to_s3, time_to_epoch, deunicodise, decode_from_s3,
+                    check_bucket_name_dns_support, s3_quote)
 from .SortedDict import SortedDict
 
 import datetime
-try:
-    # python 3 support
-    from urllib import quote
-except ImportError:
-    from urllib.parse import quote
+
 
 from hashlib import sha1, sha256
 
@@ -159,7 +156,12 @@ def sign_url_base_v2(**parms):
     debug("Signing plaintext: %r", signtext)
     parms['sig'] = s3_quote(sign_string_v2(encode_to_s3(signtext)), unicode_output=True)
     debug("Urlencoded signature: %s", parms['sig'])
-    url = "%(proto)s://%(bucket)s.%(host_base)s/%(object)s?AWSAccessKeyId=%(access_key)s&Expires=%(expiry)d&Signature=%(sig)s" % parms
+    if check_bucket_name_dns_support(Config.Config().host_bucket, parms['bucket']):
+        url = "%(proto)s://%(bucket)s.%(host_base)s/%(object)s"
+    else:
+        url = "%(proto)s://%(host_base)s/%(bucket)s/%(object)s"
+    url += "?AWSAccessKeyId=%(access_key)s&Expires=%(expiry)d&Signature=%(sig)s"
+    url = url % parms
     if content_disposition:
         url += "&response-content-disposition=" + s3_quote(content_disposition, unicode_output=True)
     if content_type:
@@ -245,33 +247,10 @@ def sign_request_v4(method='GET', host='', canonical_uri='/', params=None,
     return new_headers
 __all__.append("sign_request_v4")
 
-def s3_quote(param, quote_backslashes=True, unicode_output=False):
-    """
-    URI encode every byte. UriEncode() must enforce the following rules:
-    - URI encode every byte except the unreserved characters: 'A'-'Z', 'a'-'z', '0'-'9', '-', '.', '_', and '~'.
-    - The space character is a reserved character and must be encoded as "%20" (and not as "+").
-    - Each URI encoded byte is formed by a '%' and the two-digit hexadecimal value of the byte.
-    - Letters in the hexadecimal value must be uppercase, for example "%1A".
-    - Encode the forward slash character, '/', everywhere except in the object key name.
-    For example, if the object key name is photos/Jan/sample.jpg, the forward slash in the key name is not encoded.
-    """
-    if quote_backslashes:
-        safe_chars = "~"
-    else:
-        safe_chars = "~/"
-    param = encode_to_s3(param)
-    param = quote(param, safe=safe_chars)
-    if unicode_output:
-        param = decode_from_s3(param)
-    else:
-        param = encode_to_s3(param)
-    return param
-__all__.append("s3_quote")
-
 def checksum_sha256_file(filename, offset=0, size=None):
     try:
         hash = sha256()
-    except:
+    except Exception:
         # fallback to Crypto SHA256 module
         hash = sha256.new()
     with open(deunicodise(filename),'rb') as f:
@@ -291,7 +270,7 @@ def checksum_sha256_file(filename, offset=0, size=None):
 def checksum_sha256_buffer(buffer, offset=0, size=None):
     try:
         hash = sha256()
-    except:
+    except Exception:
         # fallback to Crypto SHA256 module
         hash = sha256.new()
     if size is None:

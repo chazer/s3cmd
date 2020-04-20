@@ -25,6 +25,8 @@ import re
 import errno
 import io
 
+PY3 = (sys.version_info >= (3, 0))
+
 __all__ = ["fetch_local_list", "fetch_remote_list", "compare_filelists"]
 
 def _os_walk_unicode(top):
@@ -33,7 +35,7 @@ def _os_walk_unicode(top):
     '''
     try:
         names = os.listdir(deunicodise(top))
-    except:
+    except Exception:
         return
 
     dirs, nondirs = [], []
@@ -202,7 +204,8 @@ def fetch_local_list(args, is_src = False, recursive = None):
             if counter % 1000 == 0:
                 info(u"[%d/%d]" % (counter, len_loc_list))
 
-            if relative_file == '-': continue
+            if relative_file == '-':
+                continue
 
             full_name = loc_list[relative_file]['full_name']
             try:
@@ -243,7 +246,7 @@ def fetch_local_list(args, is_src = False, recursive = None):
             try:
                 uid = os.geteuid()
                 gid = os.getegid()
-            except:
+            except Exception:
                 uid = 0
                 gid = 0
             loc_list["-"] = {
@@ -306,8 +309,16 @@ def fetch_local_list(args, is_src = False, recursive = None):
         # not.  Leave it to a non-files_from run to purge.
         if cfg.cache_file and len(cfg.files_from) == 0:
             cache.mark_all_for_purge()
-            for i in local_list.keys():
-                cache.unmark_for_purge(local_list[i]['dev'], local_list[i]['inode'], local_list[i]['mtime'], local_list[i]['size'])
+            if PY3:
+                local_list_val_iter = local_list.values()
+            else:
+                local_list_val_iter = local_list.itervalues()
+            for f_info in local_list_val_iter:
+                inode = f_info.get('inode', 0)
+                if not inode:
+                    continue
+                cache.unmark_for_purge(f_info['dev'], inode, f_info['mtime'],
+                                       f_info['size'])
             cache.purge()
             cache.save(cfg.cache_file)
 
@@ -531,7 +542,7 @@ def compare_filelists(src_list, dst_list, src_remote, dst_remote):
             try:
                 src_md5 = src_list.get_md5(file)
                 dst_md5 = dst_list.get_md5(file)
-            except (IOError,OSError):
+            except (IOError, OSError):
                 # md5 sum verification failed - ignore that file altogether
                 debug(u"IGNR: %s (disappeared)" % (file))
                 warning(u"%s: file disappeared, ignoring." % (file))
@@ -593,7 +604,7 @@ def compare_filelists(src_list, dst_list, src_remote, dst_remote):
                     # Found one, we want to copy
                     dst1 = dst_list.find_md5_one(md5)
                     debug(u"DST COPY src: %s -> %s" % (dst1, relative_file))
-                    copy_pairs.append((src_list[relative_file], dst1, relative_file))
+                    copy_pairs.append((src_list[relative_file], dst1, relative_file, md5))
                     del(src_list[relative_file])
                     del(dst_list[relative_file])
                 else:
@@ -610,12 +621,13 @@ def compare_filelists(src_list, dst_list, src_remote, dst_remote):
             try:
                 md5 = src_list.get_md5(relative_file)
             except IOError:
-               md5 = None
+                md5 = None
             dst1 = dst_list.find_md5_one(md5)
             if dst1 is not None:
                 # Found one, we want to copy
                 debug(u"DST COPY dst: %s -> %s" % (dst1, relative_file))
-                copy_pairs.append((src_list[relative_file], dst1, relative_file))
+                copy_pairs.append((src_list[relative_file], dst1,
+                                   relative_file, md5))
                 del(src_list[relative_file])
             else:
                 # we don't have this file, and we don't have a copy of this file elsewhere.  Get it.

@@ -13,12 +13,22 @@ import sys
 import S3.Utils
 from . import ExitCodes
 
-if sys.version_info >= (3,0):
+if sys.version_info >= (3, 0):
     PY3 = True
     # In python 3, unicode -> str, and str -> bytes
     unicode = str
 else:
     PY3 = False
+
+## External exceptions
+
+from ssl import SSLError as S3SSLError
+
+try:
+    from ssl import CertificateError as S3SSLCertificateError
+except ImportError:
+    class S3SSLCertificateError(Exception):
+        pass
 
 
 try:
@@ -26,6 +36,9 @@ try:
 except ImportError:
     # ParseError was only added in python2.7, before ET was raising ExpatError
     from xml.parsers.expat import ExpatError as XmlParseError
+
+
+## s3cmd exceptions
 
 class S3Exception(Exception):
     def __init__(self, message = ""):
